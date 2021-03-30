@@ -2,6 +2,7 @@
 
 namespace Laravel\Passport\Guards;
 
+use Carbon\Carbon;
 use Exception;
 use Firebase\JWT\JWT;
 use Illuminate\Container\Container;
@@ -10,9 +11,11 @@ use Illuminate\Contracts\Encryption\Encrypter;
 use Illuminate\Cookie\CookieValuePrefix;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Laravel\Passport\ClientRepository;
 use Laravel\Passport\Passport;
 use Laravel\Passport\PassportUserProvider;
+use Laravel\Passport\Token;
 use Laravel\Passport\TokenRepository;
 use Laravel\Passport\TransientToken;
 use League\OAuth2\Server\Exception\OAuthServerException;
@@ -91,7 +94,7 @@ class TokenGuard
     {
         $client = $this->client($request);
 
-        if ($client && ! $client->provider) {
+        if ($client && !$client->provider) {
             return true;
         }
 
@@ -122,7 +125,7 @@ class TokenGuard
     public function client(Request $request)
     {
         if ($request->bearerToken()) {
-            if (! $psr = $this->getPsrRequestViaBearerToken($request)) {
+            if (!$psr = $this->getPsrRequestViaBearerToken($request)) {
                 return;
             }
 
@@ -144,11 +147,67 @@ class TokenGuard
      */
     protected function authenticateViaBearerToken($request)
     {
-        if (! $psr = $this->getPsrRequestViaBearerToken($request)) {
+        if (config("auth.enable_passport_stateless")) {
+            try {
+                // Extract Bearer token from header
+                $header = $request->headers->get('Authorization');
+                // Extract jwt token from $header
+                $jwt = substr($header, strlen("Bearer "));
+                // Parse token data
+                $parser = new \Lcobucci\JWT\Parser();
+                $exp = $parser->parse($jwt)->claims()->get('exp');
+                $user_uuid = $parser->parse($jwt)->claims()->get('sub');
+                $jwt_id = $parser->parse($jwt)->claims()->get('jti');
+                $scopes = $parser->parse($jwt)->claims()->get('scopes');
+                $nbf = $parser->parse($jwt)->claims()->get('nbf');
+                $nbf = Carbon::parse($nbf);
+                $client_id = $parser->parse($jwt)->claims()->get('aud');
+
+                // Check if token is expired
+                // If token is expired or revoked return null to return unauthenticated response
+                $now = Carbon::now();
+                $is_expired = $exp < $now;
+
+                if ($is_expired) {
+                    return null;
+                }
+                // If token is not expired, check if is revoked
+                else {
+                    $is_expired_in_cache = Cache::get("revoked_access_token:$jwt_id");
+                    if ($is_expired_in_cache != null) {
+                        return null;
+                    }
+                }
+
+                // If token is valid create a user model instance with uuid extracted in jwt
+                $model = config('auth.providers.' . $this->provider->getProviderName() . '.model');
+                $user = (new $model);
+                $user->uuid = $user_uuid;
+
+                // Create a token instance with user data and token data
+                $token = new Token([
+                    "id"            => $jwt_id,
+                    "user_id"       => $user_uuid,
+                    "client_id"     => $client_id,
+                    "scopes"        => $scopes,
+                    "revoked"       => false,
+                    "created_at"    => $nbf,
+                    "updated_at"    => $nbf,
+                    "expires_at"    => $exp
+                ]);
+
+                return $token ? $user->withAccessToken($token) : null;
+            } catch (\Throwable $th) {
+                report($th);
+            }
+            return null;
+        }
+
+        if (!$psr = $this->getPsrRequestViaBearerToken($request)) {
             return;
         }
 
-        if (! $this->hasValidProvider($request)) {
+        if (!$this->hasValidProvider($request)) {
             return;
         }
 
@@ -159,7 +218,7 @@ class TokenGuard
             $psr->getAttribute('oauth_user_id') ?: null
         );
 
-        if (! $user) {
+        if (!$user) {
             return;
         }
 
@@ -219,7 +278,7 @@ class TokenGuard
      */
     protected function authenticateViaCookie($request)
     {
-        if (! $token = $this->getTokenViaCookie($request)) {
+        if (!$token = $this->getTokenViaCookie($request)) {
             return;
         }
 
@@ -251,7 +310,7 @@ class TokenGuard
         // We will compare the CSRF token in the decoded API token against the CSRF header
         // sent with the request. If they don't match then this request isn't sent from
         // a valid source and we won't authenticate the request for further handling.
-        if (! Passport::$ignoreCsrfToken && (! $this->validCsrf($token, $request) ||
+        if (!Passport::$ignoreCsrfToken && (!$this->validCsrf($token, $request) ||
             time() >= $token['expiry'])) {
             return;
         }
@@ -284,7 +343,8 @@ class TokenGuard
     protected function validCsrf($token, $request)
     {
         return isset($token['csrf']) && hash_equals(
-            $token['csrf'], (string) $this->getTokenFromRequest($request)
+            $token['csrf'],
+            (string) $this->getTokenFromRequest($request)
         );
     }
 
@@ -298,7 +358,7 @@ class TokenGuard
     {
         $token = $request->header('X-CSRF-TOKEN');
 
-        if (! $token && $header = $request->header('X-XSRF-TOKEN')) {
+        if (!$token && $header = $request->header('X-XSRF-TOKEN')) {
             $token = CookieValuePrefix::remove($this->encrypter->decrypt($header, static::serialized()));
         }
 
