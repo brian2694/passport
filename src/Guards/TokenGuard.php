@@ -20,6 +20,7 @@ use Laravel\Passport\TokenRepository;
 use Laravel\Passport\TransientToken;
 use League\OAuth2\Server\Exception\OAuthServerException;
 use League\OAuth2\Server\ResourceServer;
+use Modules\Auth\CustomClasses\BsOauthTokenUtils;
 use Nyholm\Psr7\Factory\Psr17Factory;
 use Symfony\Bridge\PsrHttpMessage\Factory\PsrHttpFactory;
 
@@ -154,18 +155,19 @@ class TokenGuard
                 // Extract jwt token from $header
                 $jwt = substr($header, strlen("Bearer "));
                 // Parse token data
-                $parser = new \Lcobucci\JWT\Parser();
-                $exp = $parser->parse($jwt)->claims()->get('exp');
-                $user_uuid = $parser->parse($jwt)->claims()->get('sub');
-                $jwt_id = $parser->parse($jwt)->claims()->get('jti');
-                $scopes = $parser->parse($jwt)->claims()->get('scopes');
-                $nbf = $parser->parse($jwt)->claims()->get('nbf');
+                $jwtDecoded = BsOauthTokenUtils::firebaseJwtParser($jwt);
+                $exp = $jwtDecoded["exp"];
+                $user_uuid = $jwtDecoded['sub'];
+                $jwt_id = $jwtDecoded['jti'];
+                $scopes = $jwtDecoded['scopes'];
+                $nbf = $jwtDecoded['nbf'];
                 $nbf = Carbon::parse($nbf);
-                $client_id = $parser->parse($jwt)->claims()->get('aud');
+                $client_id = $jwtDecoded['aud'];
 
                 // Check if token is expired
                 // If token is expired or revoked return null to return unauthenticated response
                 $now = Carbon::now();
+                $exp = Carbon::parse($exp);
                 $is_expired = $exp < $now;
 
                 if ($is_expired) {
